@@ -1,0 +1,26 @@
+# Worktrees
+.worktrees/
+
+# Old GitLab .git, renamed aside during the fresh GitHub init (not tracked)
+.git-gitlab-backup/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Build output
+dist/
+build/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

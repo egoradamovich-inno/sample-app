@@ -1,0 +1,15 @@
+node_modules
+**/node_modules
+dist
+**/dist
+build
+**/build
+apps/backend/generated
+apps/backend/uploads
+coverage
+**/coverage
+.git
+.worktrees
+**/.env
+**/.env.local
+**/.env.*.local

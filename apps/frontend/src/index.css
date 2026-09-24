@@ -1,0 +1,136 @@
+@import 'tailwindcss';
+@import '@fontsource/big-shoulders-display/400';
+@import '@fontsource/big-shoulders-display/600';
+@import '@fontsource/big-shoulders-display/700';
+@import '@fontsource/archivo/400';
+@import '@fontsource/archivo/500';
+@import '@fontsource/archivo/600';
+@import '@fontsource/archivo/700';
+@import '@fontsource/ibm-plex-mono/400';
+@import '@fontsource/ibm-plex-mono/500';
+
+/* Field House Ledger design system — see tasks/TASK-008/frontend-design-spec.md */
+@theme {
+  --font-display: 'Big Shoulders Display', sans-serif;
+  --font-body: 'Archivo', sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
+
+  --color-paper: #f7f3ec;
+  --color-paper-raised: #ffffff;
+  --color-ink: #12151c;
+  --color-ink-soft: #4a4e5a;
+  --color-rule: rgba(18, 21, 28, 0.12);
+  --color-rule-strong: rgba(18, 21, 28, 0.22);
+
+  --color-cinder: #e2621b;
+  --color-cinder-dark: #b84d12;
+  --color-cinder-tint: #fbeae0;
+
+  --color-status-active: #2f7a4d;
+  /* Darkened from the originally-specified #8b8578 (~3.32:1 on --color-paper, fails WCAG AA's
+     4.5:1 small-text minimum for StampBadge's 12px uppercase label) to #6e6858 (~5.0:1) — same
+     olive-taupe hue family, just enough darker to pass, still visually distinct from active/
+     deleted/pending. See tasks/TASK-008/code-reviewer-report.md's StampBadge contrast finding. */
+  --color-status-inactive: #6e6858;
+  --color-status-deleted: #8c2f1b;
+  /* Darkened from the originally-specified #b0791a (~3.39:1 on --color-paper, same AA failure)
+     to #8a5b14 (~5.3:1) — same amber hue, darkened just enough to pass while staying distinct. */
+  --color-status-pending: #8a5b14;
+
+  --color-alert: #b3261e;
+  --color-alert-dark: #8f1e18;
+  --color-alert-ink: #fff8e7;
+  --color-alert-stripe: #f2b705;
+
+  /* Type scale — frontend-design-spec.md's Design Tokens > Typography, verbatim */
+  --text-display-xl: 3.5rem;
+  --text-display-xl--line-height: 1;
+  --text-display-lg: 2.25rem;
+  --text-display-lg--line-height: 1.05;
+  --text-display-md: 1.5rem;
+  --text-display-md--line-height: 1.1;
+  --text-body: 0.9375rem;
+  --text-body--line-height: 1.5;
+  --text-label: 0.75rem;
+  --text-label--line-height: 1.2;
+  --text-mono: 0.8125rem;
+  --text-mono--line-height: 1.4;
+}
+
+:root[data-theme='dark'] {
+  --color-paper: #12151c;
+  --color-paper-raised: #1b1f29;
+  --color-ink: #f2efe8;
+  --color-ink-soft: #aba9a2;
+  --color-rule: rgba(242, 239, 232, 0.12);
+  --color-rule-strong: rgba(242, 239, 232, 0.22);
+  --color-cinder: #f2793a;
+  --color-cinder-dark: #ff9257;
+  --color-cinder-tint: rgba(242, 121, 58, 0.14);
+  --color-status-active: #48a56b;
+  --color-status-inactive: #9c9a8f;
+  --color-status-deleted: #c1523a;
+  --color-status-pending: #d19a3d;
+  --color-alert: #e0483b;
+  --color-alert-dark: #c1382c;
+  --color-alert-ink: #12151c;
+  --color-alert-stripe: #f2b705;
+}
+
+body {
+  margin: 0;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-body);
+}
+
+/* Shared motion motifs (frontend-design-spec.md): Roster Stamp settle for state-change
+   badges, slide-up for modals, Locker Nameplate Flip for ContextSwitcher. All degrade to
+   opacity-only under prefers-reduced-motion via the `motion-safe:`/`motion-reduce:` utility
+   pairing used at each call site, not a single global override. */
+@keyframes stamp-settle {
+  0% {
+    transform: scale(1.4) rotate(-14deg);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1) rotate(-2deg);
+    opacity: 1;
+  }
+}
+
+@keyframes modal-slide-up {
+  0% {
+    transform: translateY(16px);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes nameplate-flip-open {
+  0% {
+    transform: rotateX(90deg);
+    opacity: 0;
+  }
+  100% {
+    transform: rotateX(0deg);
+    opacity: 1;
+  }
+}
+
+/* Reuses `modal-slide-up`'s exact 150ms/ease-out timing for the same "reveal more fields"
+   moment described in frontend-design-spec.md (RegisterPage's child sub-form), just without a
+   modal's translateY distance since this reveals inline rather than sliding a whole panel up. */
+@keyframes field-reveal-open {
+  0% {
+    transform: translateY(-8px);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}

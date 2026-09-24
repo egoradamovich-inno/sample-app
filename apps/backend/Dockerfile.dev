@@ -1,0 +1,34 @@
+FROM node:22-slim
+
+# bcrypt/sharp native build toolchain + OpenSSL for Prisma's query engine
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 make g++ openssl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# npm workspaces: npm ci needs the root lockfile + every workspace's package.json,
+# even though this image only ever runs the backend.
+COPY package.json package-lock.json ./
+COPY apps/backend/package.json ./apps/backend/package.json
+COPY apps/frontend/package.json ./apps/frontend/package.json
+
+RUN npm ci
+
+COPY apps/backend/prisma ./apps/backend/prisma
+# Run from apps/backend (matches how native db:init/db:setup invoke it) so engine paths are
+# cwd-relative the same way they are natively.
+RUN cd apps/backend && npx prisma generate
+# On this Prisma version (6.19.3), `prisma generate` emits relative imports/exports with a
+# ".ts" extension when run on Linux, but ".js" when run on Windows (verified: same version,
+# same schema, same command — reproduced independently of Docker). The ".ts" form breaks at
+# runtime (Node/tsc expect the compiled ".js" sibling, not the source ".ts"), causing a
+# MODULE_NOT_FOUND for every generated/prisma/internal/*.ts import. Normalize back to ".js" so
+# the generated client behaves the same as it does for native dev on this team's machines.
+RUN find apps/backend/generated/prisma -type f -name '*.ts' ! -name '*.d.ts' -print0 \
+  | xargs -0 sed -i -E "s/(from [\"'])([^\"']+)\.ts([\"'])/\1\2.js\3/g"
+
+COPY apps/backend/docker-entrypoint.sh ./apps/backend/docker-entrypoint.sh
+RUN chmod +x ./apps/backend/docker-entrypoint.sh
+
+ENTRYPOINT ["bash", "./apps/backend/docker-entrypoint.sh"]

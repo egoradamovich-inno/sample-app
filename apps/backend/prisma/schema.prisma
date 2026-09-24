@@ -1,0 +1,279 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPER_ADMIN
+  TRAINER
+  COACH
+  PLAYER
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  DELETED
+}
+
+enum ShareLinkType {
+  STATIC
+  UNIQUE
+}
+
+enum AvailabilityOwnerType {
+  COACH
+  PLAYER
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  DENIED
+  EXPIRED
+}
+
+enum PaymentType {
+  USD
+  TOKEN
+}
+
+model User {
+  id            String     @id @default(uuid())
+  email         String     @unique
+  passwordHash  String
+  role          Role
+  status        UserStatus @default(ACTIVE)
+  emailVerified Boolean    @default(false)
+  parentUserId  String?
+  parent        User?      @relation("ParentChild", fields: [parentUserId], references: [id])
+  children      User[]     @relation("ParentChild")
+  lastLoginAt   DateTime?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  profile                Profile?
+  trainerProfile         TrainerProfile?
+  coachProfile           CoachProfile?
+  playerProfile          PlayerProfile?
+  refreshTokens          RefreshToken[]
+  emailVerifications     EmailVerificationToken[]
+  passwordResets         PasswordResetToken[]
+  shareLinksCreated      ShareLink[]              @relation("ShareLinkCreatedBy")
+  impersonationsAsAdmin  ImpersonationLog[]       @relation("ImpersonationAdmin")
+  impersonationsAsTarget ImpersonationLog[]       @relation("ImpersonationTarget")
+
+  @@index([status])
+}
+
+model Profile {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id])
+  firstName String
+  lastName  String
+  phone     String?
+  photoUrl  String?
+  school    String?
+  updatedAt DateTime @updatedAt
+}
+
+model TrainerProfile {
+  id           String    @id @default(uuid())
+  userId       String    @unique
+  user         User      @relation(fields: [userId], references: [id])
+  businessName String
+  address      String?
+  website      String?
+  description  String?
+  branding     Branding?
+}
+
+model Branding {
+  id               String         @id @default(uuid())
+  trainerProfileId String         @unique
+  trainerProfile   TrainerProfile @relation(fields: [trainerProfileId], references: [id])
+  logoUrl          String?
+  primaryColorHex  String?
+  updatedAt        DateTime       @updatedAt
+}
+
+model CoachProfile {
+  id             String   @id @default(uuid())
+  userId         String   @unique
+  user           User     @relation(fields: [userId], references: [id])
+  trainerId      String
+  bio            String?
+  credentials    String?
+  certifications String[]
+  publicVisible  Boolean  @default(false)
+  publicSlug     String?  @unique
+  joinedAt       DateTime @default(now())
+
+  @@index([trainerId])
+}
+
+model PlayerProfile {
+  id               String    @id @default(uuid())
+  userId           String?   @unique
+  user             User?     @relation(fields: [userId], references: [id])
+  parentUserId     String
+  displayName      String
+  birthDate        DateTime?
+  gender           String?
+  skillLevel       String?
+  school           String?
+  jerseyNumber     String?
+  isChild          Boolean   @default(false)
+  emergencyContact String?
+  tokenAutoApprove Boolean   @default(false)
+
+  associations TrainerPlayerAssociation[]
+  approvals    ChildPurchaseApproval[]    @relation("ChildApprovals")
+
+  @@index([parentUserId])
+}
+
+model RefreshToken {
+  id             String    @id @default(uuid())
+  userId         String
+  user           User      @relation(fields: [userId], references: [id])
+  tokenHash      String
+  expiresAt      DateTime
+  revoked        Boolean   @default(false)
+  createdAt      DateTime  @default(now())
+  // Set only for impersonation-scoped token chains: the admin who started
+  // the session, and the absolute timestamp a sliding refresh may never
+  // extend past (the 1h impersonation cap survives every subsequent slide).
+  impersonatedBy String?
+  maxExpiresAt   DateTime?
+
+  @@index([userId])
+  @@index([tokenHash])
+}
+
+model EmailVerificationToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+  token     String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+  token     String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+}
+
+model ShareLink {
+  id          String        @id @default(uuid())
+  code        String        @unique
+  type        ShareLinkType
+  trainerId   String
+  createdById String
+  createdBy   User          @relation("ShareLinkCreatedBy", fields: [createdById], references: [id])
+  targetEmail String?
+  expiresAt   DateTime?
+  maxUses     Int?
+  useCount    Int           @default(0)
+  active      Boolean       @default(true)
+  createdAt   DateTime      @default(now())
+
+  associations TrainerPlayerAssociation[]
+
+  @@index([trainerId])
+}
+
+model TrainerPlayerAssociation {
+  id              String        @id @default(uuid())
+  trainerId       String
+  playerProfileId String
+  playerProfile   PlayerProfile @relation(fields: [playerProfileId], references: [id])
+  shareLinkId     String?
+  shareLink       ShareLink?    @relation(fields: [shareLinkId], references: [id])
+  connectedAt     DateTime      @default(now())
+  status          String        @default("ACTIVE")
+
+  @@unique([trainerId, playerProfileId])
+  @@index([trainerId, playerProfileId])
+}
+
+model Availability {
+  id          String                @id @default(uuid())
+  ownerType   AvailabilityOwnerType
+  ownerId     String
+  dayOfWeek   Int
+  startTime   String
+  endTime     String
+  isAvailable Boolean               @default(true)
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+
+  @@index([ownerType, ownerId])
+}
+
+model CoachAvailabilityOverride {
+  id           String   @id @default(uuid())
+  eventId      String?
+  coachId      String
+  trainerId    String
+  reason       String
+  overriddenBy String
+  createdAt    DateTime @default(now())
+
+  @@index([coachId])
+}
+
+model ImpersonationLog {
+  id              String    @id @default(uuid())
+  adminId         String
+  admin           User      @relation("ImpersonationAdmin", fields: [adminId], references: [id])
+  targetUserId    String
+  target          User      @relation("ImpersonationTarget", fields: [targetUserId], references: [id])
+  startedAt       DateTime  @default(now())
+  endedAt         DateTime?
+  durationSeconds Int?
+}
+
+model ChildPurchaseApproval {
+  id                 String         @id @default(uuid())
+  childProfileId     String
+  childProfile       PlayerProfile  @relation("ChildApprovals", fields: [childProfileId], references: [id])
+  parentUserId       String
+  eventOrPurchaseRef String
+  amount             Decimal        @db.Decimal(10, 2)
+  paymentType        PaymentType
+  status             ApprovalStatus @default(PENDING)
+  requestedAt        DateTime       @default(now())
+  respondedAt        DateTime?
+  expiresAt          DateTime
+  parentNotes        String?
+
+  @@index([parentUserId])
+}
+
+model UserDeletionLog {
+  id                  String   @id @default(uuid())
+  originalUserId      String
+  originalEmailBackup String
+  deletedById         String
+  reason              String?
+  deletedAt           DateTime @default(now())
+}

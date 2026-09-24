@@ -1,0 +1,110 @@
+{
+    "env": {
+        "NODE_ENV": "development",
+        "FORCE_COLOR": "1"
+    },
+    "permissions": {
+        "allow": [
+            "Read(**)",
+            "Edit(**)",
+            "Write(**)",
+            "Glob(**)",
+            "Grep(**)",
+            "Bash(npx:*)",
+            "Bash(npm:*)",
+            "Bash(git:*)",
+            "Bash(ls:*)",
+            "Bash(mkdir:*)",
+            "Bash(cp:*)",
+            "Bash(mv:*)",
+            "Bash(cat:*)",
+            "Bash(echo:*)",
+            "Bash(rtk:*)",
+            "WebFetch(domain:github.com)",
+            "WebFetch(domain:api.github.com)",
+            "WebFetch(domain:raw.githubusercontent.com)",
+            "WebFetch(domain:nx.dev)",
+            "WebFetch(domain:docs.nestjs.com)"
+        ],
+        "deny": [
+            "Read(.env)",
+            "Read(.env.*)",
+            "Edit(.env)",
+            "Edit(.env.*)",
+            "Write(.env)",
+            "Write(.env.*)",
+            "Read(./secrets/**)",
+            "Bash(rm -rf:*)",
+            "Bash(sudo:*)",
+            "Bash(chmod 777:*)"
+        ]
+    },
+    "hooks": {
+        "SessionStart": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": ".claude/hooks/local-context.sh",
+                        "timeout": 10000
+                    }
+                ]
+            }
+        ],
+        "PreToolUse": [
+            {
+                "matcher": "Write|Edit",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "echo '$TOOL_INPUT' | .claude/hooks/file-naming-validator.sh",
+                        "timeout": 5000
+                    }
+                ]
+            },
+            {
+                "matcher": "Bash",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "echo '$TOOL_INPUT' | .claude/hooks/rtk-rewrite.sh",
+                        "timeout": 5000
+                    }
+                ]
+            },
+            {
+                "matcher": "Bash",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "echo '$TOOL_INPUT' | .claude/hooks/bash-validator.sh",
+                        "timeout": 5000
+                    }
+                ]
+            }
+        ],
+        "PostToolUse": [
+            {
+                "matcher": "Edit",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "echo '$TOOL_INPUT' | .claude/hooks/loop-detection.sh",
+                        "timeout": 5000
+                    }
+                ]
+            }
+        ],
+        "Notification": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "powershell.exe -Command \"[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); $n = New-Object System.Windows.Forms.NotifyIcon; $n.Icon = [System.Drawing.SystemIcons]::Information; $n.Visible = $true; $n.ShowBalloonTip(3000, 'Claude Code', 'Claude needs your attention', 'Info')\" 2>/dev/null || echo '🔔 Claude Code notification'",
+                        "timeout": 5000
+                    }
+                ]
+            }
+        ]
+    }
+}

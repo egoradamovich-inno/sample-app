@@ -1,0 +1,37 @@
+---
+title: Every Form Input Must Have a Label
+impact: MEDIUM-HIGH
+impactDescription: unlabeled inputs are invisible to screen readers
+tags: forms, labels, input
+related: [aria-labels-required, forms-error-messages]
+---
+
+## Every Form Input Must Have a Label
+
+**Impact: MEDIUM-HIGH (unlabeled inputs are invisible to screen readers)**
+
+Every form control must have a visible, programmatically associated label. Placeholder is not a label. WCAG 1.3.1, 3.3.2.
+
+**Incorrect: no associated label**
+
+```tsx
+<input type="email" placeholder="Email" />
+<div className="label">Username</div>
+<input type="text" />
+```
+
+**Correct: properly associated labels**
+
+```tsx
+<label htmlFor="email">Email</label>
+<input id="email" type="email" placeholder="user@example.com" />
+
+<label>
+  Username
+  <input type="text" />
+</label>
+```
+
+Placeholder disappears on input, so it cannot serve as a label. Always use `<label>` with `htmlFor` or wrapping.
+
+Labels follow the same principle as [[aria-labels-required]] — every interactive element needs an accessible name. When inputs have errors, [[forms-error-messages]] must also be associated with the input.

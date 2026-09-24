@@ -1,0 +1,69 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-accelerator}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-accelerator}
+      POSTGRES_DB: ${POSTGRES_DB:-accelerator}
+    ports:
+      - "${POSTGRES_HOST_PORT:-55432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-accelerator} -d ${POSTGRES_DB:-accelerator}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile.dev
+    # Runs tini as PID 1 so signals (docker compose down/stop) propagate correctly and any
+    # child processes nest's watch/restart cycle spawns get reaped properly.
+    init: true
+    environment:
+      # Derived from POSTGRES_USER/PASSWORD/DB by default (with an explicit DATABASE_URL always
+      # taking precedence if set) so the two can't drift out of sync with each other.
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-accelerator}:${POSTGRES_PASSWORD:-accelerator}@postgres:5432/${POSTGRES_DB:-accelerator}?schema=public}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-dev-secret-change-me}
+      NODE_ENV: development
+      PORT: 3000
+      # nest start --watch drives TypeScript's own watch API (ts.createWatchProgram), not
+      # chokidar, so CHOKIDAR_USEPOLLING has no effect on it. These are the env vars tsc's
+      # watch program itself reads to force polling instead of native fs events, which is
+      # what's actually needed for reliable hot-reload on Docker Desktop for Windows bind mounts.
+      TSC_WATCHFILE: "PriorityPollingInterval"
+      TSC_WATCHDIRECTORY: "DynamicPriorityPolling"
+    ports:
+      - "${BACKEND_HOST_PORT:-3000}:3000"
+    volumes:
+      - .:/app
+      - backend_node_modules:/app/node_modules
+      - backend_prisma_generated:/app/apps/backend/generated
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: .
+      dockerfile: apps/frontend/Dockerfile.dev
+    working_dir: /app/apps/frontend
+    command: ["npx", "vite", "--host", "0.0.0.0"]
+    environment:
+      VITE_PROXY_TARGET: ${VITE_PROXY_TARGET:-http://backend:3000}
+      CHOKIDAR_USEPOLLING: "true"
+    ports:
+      - "${FRONTEND_HOST_PORT:-5173}:5173"
+    volumes:
+      - .:/app
+      - frontend_node_modules:/app/node_modules
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  backend_node_modules:
+  frontend_node_modules:
+  backend_prisma_generated:
