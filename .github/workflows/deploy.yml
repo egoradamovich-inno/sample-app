@@ -26,6 +26,32 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Generate Prisma Client
+        # Without this, apps/backend's generated/prisma types don't exist on this fresh
+        # checkout, and every file touching a Prisma delegate/enum fails ESLint's
+        # @typescript-eslint/no-unsafe-* rules with "cannot be resolved" — confirmed via the
+        # actual npm ci step log: no `prisma generate` runs automatically (no postinstall
+        # hook for it in package.json; @prisma/client's own postinstall only fetches engine
+        # binaries, it doesn't generate types).
+        run: npx prisma generate
+        working-directory: apps/backend
+        env:
+          # Exists only to satisfy prisma.config.ts's eager env("DATABASE_URL") read at
+          # generate time (actions/checkout brings prisma.config.ts in from the start here,
+          # unlike the Dockerfile's staged COPY order) — prisma generate only needs the
+          # schema to produce types, it never connects to this URL. Scoped to this one step
+          # via env:, so it can't leak into any other step, job, or the real deploy.
+          DATABASE_URL: "postgresql://placeholder:placeholder@localhost:5432/placeholder"
+      - name: Fix generated Prisma client's .ts import extensions (Linux-only quirk)
+        # On this Prisma version (6.19.3), `prisma generate` emits relative imports/exports
+        # with a ".ts" extension when run on Linux (this self-hosted runner), vs ".js" on
+        # Windows — same issue the Dockerfile's builder stage and Dockerfile.dev already work
+        # around. Left unfixed, TypeScript/ESLint can't resolve these either, which would
+        # reintroduce "cannot be resolved" errors for a different reason than the missing
+        # generate step above.
+        run: |
+          find apps/backend/generated/prisma -type f -name '*.ts' ! -name '*.d.ts' -print0 \
+            | xargs -0 sed -i -E "s/(from [\"'])([^\"']+)\.ts([\"'])/\1\2.js\3/g"
       - run: npm run lint:backend
       - run: npm run lint:frontend
 
