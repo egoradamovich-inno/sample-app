@@ -221,9 +221,13 @@ jobs:
           fi
 
       - name: Deploy the Knative Service
+        # kn's -f/--filename takes a real file path only, no stdin support (confirmed via
+        # `kn service apply --help`: --containers explicitly documents '-' for stdin, -f does
+        # not) — unlike kubectl apply -f -, `kn service apply -f -` fails with "open -: no
+        # such file or directory". Render to a real temp file first.
         run: |
-          IMAGE="$IMAGE:${{ github.sha }}" \
-            envsubst < k8s/knative-service.template.yaml | kn service apply sample-app -n sample-app -f -
+          IMAGE="$IMAGE:${{ github.sha }}" envsubst < k8s/knative-service.template.yaml > /tmp/knative-service.rendered.yaml
+          kn service apply sample-app -n sample-app -f /tmp/knative-service.rendered.yaml
 
       - name: Verify reachability (FR-014, Constitution Principle VI — real curl, not a green checkmark)
         run: |
