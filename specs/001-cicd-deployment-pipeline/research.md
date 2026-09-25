@@ -198,9 +198,25 @@ findings without blocking" and "fail on ERROR-level findings" from one scan pass
 official CI examples confirm exactly this pattern (`trivy image --exit-code 1 --severity
 CRITICAL ...`). Decision: two invocations against the same already-built local image — (1) full
 report, all severities, `--exit-code 0`, output saved as the run's visible artifact for SC-004;
-(2) gating pass, `--severity CRITICAL,HIGH --exit-code 1`, fails the job on a nonzero exit. Both
-runs reuse Trivy's local vulnerability DB cache, so the second pass is fast (no re-pull, no
-re-scan of layers from scratch beyond cache lookup).
+(2) gating pass, `--severity CRITICAL,HIGH --ignore-unfixed --exit-code 1`, fails the job on a
+nonzero exit. Both runs reuse Trivy's local vulnerability DB cache, so the second pass is fast
+(no re-pull, no re-scan of layers from scratch beyond cache lookup).
+
+**`--ignore-unfixed` addendum (discovered during `/speckit-implement`'s first real pipeline
+run, not anticipated in the original design)**: the gating pass without this flag reproducibly
+failed on ~64 CRITICAL/HIGH findings — every one of them in `node:22-slim`'s Debian base layer
+(util-linux, systemd, gzip, zlib, ncurses, perl) or npm's own bundled CLI installation
+(pacote, picomatch, sigstore, etc.), confirmed via the actual Trivy table output: every single
+finding had an empty `Fixed Version` column and a status of `affected`/`fix_deferred`/
+`will_not_fix`. None were actionable by anything this repo controls — not a Dockerfile change,
+not an `apt-get upgrade`, not a dependency bump. `--ignore-unfixed` is Trivy's own documented
+shorthand for `--ignore-status affected,will_not_fix,fix_deferred,end_of_life` — it excludes
+exactly this class of finding from the *gate* while the full report step (SC-004) stays
+unfiltered, so genuinely fixable CRITICAL/HIGH findings (a real Fixed Version exists and isn't
+applied) still block the pipeline. Separately, the same run's `node-pkg` findings that *did*
+have a Fixed Version (`multer`, `sharp`, `react-router`, `deepmerge-ts`, `js-yaml` nested under
+`@nestjs/swagger`) were fixed directly — version bumps plus root-level npm `overrides` for the
+transitive-only ones — not filtered out.
 
 ## 7. `kubectl wait` timeout values for Postgres availability and the migration Job
 

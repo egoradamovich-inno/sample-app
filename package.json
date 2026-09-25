@@ -21,13 +21,21 @@
     "docker:reset-db": "docker compose down -v && docker compose up -d",
     "docker:seed": "docker compose exec backend npm run db:seed"
   },
+  "overrides": {
+    "multer": "2.3.0",
+    "react-router": "7.18.2",
+    "deepmerge-ts": "8.0.0",
+    "@nestjs/swagger": {
+      "js-yaml": "5.2.2"
+    }
+  },
   "allowScripts": {
     "@prisma/client@6.19.3": true,
     "@prisma/engines@6.19.3": true,
     "@scarf/scarf@1.4.0": true,
     "bcrypt@6.0.0": true,
     "prisma@6.19.3": true,
-    "sharp@0.33.5": true,
-    "unrs-resolver@1.12.2": true
+    "unrs-resolver@1.12.2": true,
+    "@parcel/watcher@2.6.0": true
   }
 }
