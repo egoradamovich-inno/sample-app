@@ -2,7 +2,7 @@
 
 ## Status
 
-**Blocked** — root-caused and documented; fix belongs in Part I (Terraform/libvirt), not this repo. The CI/CD pipeline (`001-cicd-deployment-pipeline`) cannot complete a successful `deploy` job until this is addressed at the platform level.
+**Resolved.** The recommended Terraform fix (`cpu { mode = "host-passthrough" }` on the `k3s-worker1`/`k3s-worker2` `libvirt_domain` resources) was applied and re-provisioned outside this repo. Verified independently, not assumed: a throwaway diagnostic pod on each worker confirmed `sharp._isUsingX64V2()` returns `true` on both, and the live running libvirt domain XML for both workers shows `<cpu mode='host-passthrough' check='none' migratable='on'/>`. A subsequent real deploy confirmed the app pod boots cleanly with `sharp` loading via its native binding. See `specs/001-cicd-deployment-pipeline/research.md` §8 for the full evidence chain.
 
 ## Context
 
