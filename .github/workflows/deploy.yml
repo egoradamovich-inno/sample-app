@@ -207,10 +207,14 @@ jobs:
             envsubst < k8s/migration-job.template.yaml | kubectl apply -n sample-app -f -
 
       - name: Wait for migration to complete
-        # 180s: verified — `prisma migrate deploy` measured at ~1s against this schema, so the
-        # budget is pull/schedule headroom, not migration runtime (research.md §7).
+        # 300s: revised after a real first deploy against the live cluster measured the
+        # actual Job duration at 3m1s (181s) against the original 180s budget — 92s image
+        # pull (337MB, first pull of that tag on that node) + ~89s of CPU-throttled Prisma
+        # CLI startup (see the migration Job manifest's resources comment). 300s keeps real
+        # margin above that observed figure rather than the bare few seconds the old budget
+        # left (research.md §7 addendum).
         run: |
-          if ! kubectl wait --for=condition=complete job/sample-app-migrate-${{ github.run_id }} -n sample-app --timeout=180s; then
+          if ! kubectl wait --for=condition=complete job/sample-app-migrate-${{ github.run_id }} -n sample-app --timeout=300s; then
             echo "::error::Migration Job failed — stopping before kn service apply (FR-011)"
             kubectl logs job/sample-app-migrate-${{ github.run_id }} -n sample-app
             exit 1

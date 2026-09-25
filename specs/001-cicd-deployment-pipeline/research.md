@@ -251,3 +251,21 @@ rather than estimating from memory:
   migration/readiness timings were measured — an oversized timeout only delays failure detection
   for a genuinely stuck deploy (e.g. a real connectivity problem to Postgres), which works against
   Principle VI's "fail loudly" spirit.
+
+**Addendum — revised after the first real deploy against the live cluster (`/speckit-implement`,
+not anticipated at plan time)**: the migration Job's `kubectl wait --timeout=180s` timed out on
+the very first real run. `kubectl describe pod` on the (still-present, `Complete`) Job's pod gave
+the actual breakdown, not a guess: image pull took **1m31.861s** (92s) for the 337MB image — a
+real first-ever pull of that exact tag on that node, in the same ballpark this planning
+session's local-connection pull-time estimate assumed generous headroom for — and the Job's total
+`DURATION` was **3m1s (181s)**, meaning the remaining ~89s went to container start + `prisma
+migrate deploy` itself. That ~89s is dramatically higher than this session's earlier ~1s local
+measurement, because that measurement ran unthrottled on this planning session's own machine,
+not under the migration Job's original `100m`/`200m` CPU request/limit — the Prisma CLI's own
+startup (transpiling `prisma.config.ts` via `jiti`, resolving and linking the query engine
+binary) is real CPU-bound work, and 100-200m CPU throttles it heavily. **Revised**: Job resources
+raised to `requests: {cpu: 250m, memory: 256Mi}` / `limits: {cpu: 500m, memory: 512Mi}` (closing
+the gap at the root, not just papering over it with a bigger number), and the timeout raised to
+`300s` (real margin above the observed 181s, rather than the ~1s the original 180s left). This is
+exactly the class of assumption Principle VI exists to catch — a local approximation stood in for
+the live system's actual behavior, and the live system disagreed.

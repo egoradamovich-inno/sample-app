@@ -36,12 +36,16 @@ spec:
                   name: sample-app-db-credentials
                   key: DATABASE_URL
           # Explicit, not implicit BestEffort, for consistency with every other manifest in
-          # this repo. Short-lived (~1s of actual `prisma migrate deploy` work, measured
-          # empirically against this schema), so this is a small, fixed footprint.
+          # this repo. Raised from an initial 100m/128Mi after a real first deploy against
+          # the live cluster: the Prisma CLI's own startup (jiti-transpiling prisma.config.ts,
+          # resolving/linking the query engine binary) is real CPU-bound work that got
+          # heavily throttled at 100m/200m, taking ~89s in-container vs. ~1s measured
+          # unthrottled locally — this is sized to bring that back down closer to the
+          # unthrottled figure, not just to raise the timeout below to compensate.
           resources:
             requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: 200m
+              cpu: 250m
               memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
