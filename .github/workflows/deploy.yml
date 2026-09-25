@@ -1,0 +1,196 @@
+name: CI/CD
+
+# workflow_dispatch: spec.md Assumptions explicitly allow an on-demand manual re-run of
+# deployment without a new code change.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# packages: write is needed to push to GHCR with the workflow's own GITHUB_TOKEN.
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/sample-app
+
+jobs:
+  # FR-002: backend + frontend lint; a failing step stops the job, so no build is produced.
+  lint:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint:backend
+      - run: npm run lint:frontend
+
+  # FR-003/FR-007: SAST on every run; only ERROR-severity findings block (research.md §6).
+  sast:
+    needs: lint
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run Semgrep (full report, all severities — SC-004)
+        run: |
+          docker run --rm -v "$PWD:/src" semgrep/semgrep \
+            semgrep scan --config auto --json --output /src/semgrep-results.json /src
+      - uses: actions/upload-artifact@v7
+        with:
+          name: semgrep-results
+          path: semgrep-results.json
+      - name: Fail only on ERROR-severity findings
+        run: |
+          ERROR_COUNT=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' semgrep-results.json)
+          echo "Semgrep ERROR-severity findings: $ERROR_COUNT"
+          if [ "$ERROR_COUNT" -gt 0 ]; then
+            echo "::error::$ERROR_COUNT ERROR-severity Semgrep finding(s) — failing the pipeline"
+            exit 1
+          fi
+
+  # FR-004/FR-005/FR-006/FR-007: build the single image, scan it, push it private.
+  build-scan-push:
+    needs: sast
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build production image
+        run: docker build -t "$IMAGE:${{ github.sha }}" .
+      - name: Trivy full-severity report (SC-004, non-blocking)
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$HOME/.cache/trivy:/root/.cache/" \
+            -v "$PWD:/out" \
+            aquasec/trivy image \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL --exit-code 0 \
+            --format table --output /out/trivy-report.txt \
+            "$IMAGE:${{ github.sha }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: trivy-report
+          path: trivy-report.txt
+      - name: Trivy gate — fail only on CRITICAL/HIGH (FR-007)
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$HOME/.cache/trivy:/root/.cache/" \
+            aquasec/trivy image \
+            --severity CRITICAL,HIGH --exit-code 1 \
+            "$IMAGE:${{ github.sha }}"
+      - name: Log in to GHCR
+        # Secrets/tokens passed via env:, never interpolated directly into the script body —
+        # GitHub Actions substitutes ${{ }} as raw text before the shell parses it, so a
+        # value containing a quote or backtick would otherwise break the script's quoting or
+        # inject arbitrary commands (same risk class as the DATABASE_URL password-encoding
+        # issue below, just for shell syntax instead of URI syntax).
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
+      - name: Push (private — confirmed once via T003's one-time GHCR package-visibility check)
+        run: |
+          docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:latest"
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:latest"
+
+  # FR-008..FR-016: ensure infra, migrate, deploy, verify. FR-017: self-hosted (project-controlled).
+  deploy:
+    needs: build-scan-push
+    runs-on: self-hosted
+    # FR-016: only the deploy job is serialized — lint/sast/build-scan-push on unrelated
+    # concurrent pushes stay unaffected. cancel-in-progress: false deliberately, so a queued
+    # run never cancels one already mid-migration or mid-`kn service apply` (research.md §4).
+    concurrency:
+      group: deploy-sample-app
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Ensure namespace
+        run: kubectl apply -f k8s/namespace.yaml
+
+      - name: Ensure dedicated StorageClass
+        run: kubectl apply -f k8s/storageclass.yaml
+
+      - name: Ensure GHCR imagePullSecret (idempotent)
+        env:
+          GHCR_PULL_USERNAME: ${{ vars.GHCR_PULL_USERNAME }}
+          GHCR_PULL_PAT: ${{ secrets.GHCR_PULL_PAT }}
+        run: |
+          kubectl create secret docker-registry sample-app-ghcr-pull \
+            --docker-server=ghcr.io \
+            --docker-username="$GHCR_PULL_USERNAME" \
+            --docker-password="$GHCR_PULL_PAT" \
+            -n sample-app --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Ensure DB credentials secret (idempotent, stable password — FR-010)
+        env:
+          SAMPLE_APP_DB_PASSWORD: ${{ secrets.SAMPLE_APP_DB_PASSWORD }}
+        run: |
+          # SAMPLE_APP_DB_PASSWORD is a human-chosen secret with no character restriction
+          # (T003 documents it as "stable", not "URI-safe" or "shell-safe"). Passed via env:
+          # (never interpolated directly into the script text) so a quote/backtick in the
+          # value can't break the script's quoting or inject a command. DATABASE_URL is
+          # additionally a URI, and an unencoded @, :, /, #, %, ?, or space in the password
+          # would separately fail to parse or silently misparse the user/password/host
+          # boundary — a failure mode no status-code check in this pipeline would catch.
+          # Percent-encode only the copy embedded in the URI; POSTGRES_PASSWORD itself stays
+          # raw, since Postgres's own auth expects the literal value.
+          ENCODED_PASSWORD=$(jq -rn --arg p "$SAMPLE_APP_DB_PASSWORD" '$p | @uri')
+          kubectl create secret generic sample-app-db-credentials \
+            --from-literal=POSTGRES_USER=sampleapp \
+            --from-literal=POSTGRES_DB=sampleapp \
+            --from-literal=POSTGRES_PASSWORD="$SAMPLE_APP_DB_PASSWORD" \
+            --from-literal=DATABASE_URL="postgresql://sampleapp:${ENCODED_PASSWORD}@sample-app-postgres.sample-app.svc.cluster.local:5432/sampleapp" \
+            -n sample-app --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Ensure JWT secret (idempotent, stable value)
+        env:
+          JWT_ACCESS_SECRET: ${{ secrets.JWT_ACCESS_SECRET }}
+        run: |
+          kubectl create secret generic sample-app-jwt-secret \
+            --from-literal=JWT_ACCESS_SECRET="$JWT_ACCESS_SECRET" \
+            -n sample-app --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Ensure Postgres (Deployment + Service + PVC, idempotent — FR-009)
+        run: kubectl apply -n sample-app -f k8s/postgres-pvc.yaml -f k8s/postgres-deployment.yaml -f k8s/postgres-service.yaml
+
+      - name: Wait for Postgres to be available
+        # 240s: verified against measured readiness timing + worst-case first-ever image pull
+        # headroom (research.md §7) — not an arbitrary guess.
+        run: kubectl wait --for=condition=available deployment/sample-app-postgres -n sample-app --timeout=240s
+
+      - name: Run schema migration as a Job (FR-011)
+        run: |
+          IMAGE="$IMAGE:${{ github.sha }}" RUN_ID="${{ github.run_id }}" \
+            envsubst < k8s/migration-job.template.yaml | kubectl apply -n sample-app -f -
+
+      - name: Wait for migration to complete
+        # 180s: verified — `prisma migrate deploy` measured at ~1s against this schema, so the
+        # budget is pull/schedule headroom, not migration runtime (research.md §7).
+        run: |
+          if ! kubectl wait --for=condition=complete job/sample-app-migrate-${{ github.run_id }} -n sample-app --timeout=180s; then
+            echo "::error::Migration Job failed — stopping before kn service apply (FR-011)"
+            kubectl logs job/sample-app-migrate-${{ github.run_id }} -n sample-app
+            exit 1
+          fi
+
+      - name: Deploy the Knative Service
+        run: |
+          IMAGE="$IMAGE:${{ github.sha }}" \
+            envsubst < k8s/knative-service.template.yaml | kn service apply sample-app -n sample-app -f -
+
+      - name: Verify reachability (FR-014, Constitution Principle VI — real curl, not a green checkmark)
+        run: |
+          STATUS=$(curl -k -sS -o /tmp/body -w '%{http_code}' https://sample-app.cert.local)
+          echo "HTTP $STATUS"
+          cat /tmp/body
+          if [ "$STATUS" -lt 200 ] || [ "$STATUS" -ge 300 ]; then
+            echo "::error::Reachability check failed with HTTP $STATUS"
+            exit 1
+          fi

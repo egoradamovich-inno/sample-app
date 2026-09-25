@@ -20,5 +20,14 @@
     "docker:logs": "docker compose logs -f",
     "docker:reset-db": "docker compose down -v && docker compose up -d",
     "docker:seed": "docker compose exec backend npm run db:seed"
+  },
+  "allowScripts": {
+    "@prisma/client@6.19.3": true,
+    "@prisma/engines@6.19.3": true,
+    "@scarf/scarf@1.4.0": true,
+    "bcrypt@6.0.0": true,
+    "prisma@6.19.3": true,
+    "sharp@0.33.5": true,
+    "unrs-resolver@1.12.2": true
   }
 }

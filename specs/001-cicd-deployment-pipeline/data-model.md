@@ -1,0 +1,123 @@
+# Data Model: CI/CD Deployment Pipeline
+
+This feature is infrastructure/pipeline automation, not application data. "Entities" here are the
+pipeline/deployment resources named in spec.md's Key Entities section, expressed as concrete
+Kubernetes/GHCR/GitHub Actions objects, plus their fields, identity, relationships, and lifecycle
+(state transitions). No database schema changes — Prisma's existing `schema.prisma` is unchanged
+by this feature; only its migrations are executed by a new step.
+
+## Entity: Build Artifact
+
+Concrete form: a container image in GHCR.
+
+| Field | Value / Source |
+|---|---|
+| Registry path | `ghcr.io/<org>/sample-app` |
+| Visibility | Private (Principle IV) |
+| Tag | Git commit SHA (`${{ github.sha }}`) — every pipeline run produces a uniquely identifiable, traceable artifact; `latest` MAY additionally be pushed for convenience but the Knative Service always deploys by SHA tag, never floating `latest`, so redeploys are reproducible. |
+| Contents | Single image: Nest backend (compiled `dist/`, `generated/prisma` client, `node_modules` production deps) + frontend's built static assets (Vite `dist/`) copied into a path the backend serves via `useStaticAssets`, following the existing `/uploads` pattern in `apps/backend/src/main.ts`. |
+| Build stages | Multi-stage Dockerfile: (1) frontend builder (`npm ci && npm run build --workspace apps/frontend`), (2) backend builder (`npm ci && npm run build --workspace apps/backend`, `prisma generate`), (3) runtime (production `npm ci --omit=dev` for backend deps only, copy backend `dist/` + frontend `dist/` + `generated/prisma`, non-root user, `CMD ["node", "dist/main.js"]`). |
+| Identity/uniqueness | One artifact per pipeline run; never duplicated, never mutated after push (immutable once scanned and pushed). |
+| Consumed by | This project's own deploy job only (private registry + imagePullSecret gate any other consumer out). |
+
+**Validation rules** (from FR-002/FR-003/FR-005/FR-007): never produced if lint fails; never
+scanned if not built; never pushed if Trivy reports a CRITICAL/HIGH finding or Semgrep reports an
+ERROR-severity finding.
+
+## Entity: Deployed Application Instance
+
+Concrete form: a Knative `Service` (`serving.knative.dev/v1`) named `sample-app` in the
+`sample-app` namespace, and the Kubernetes-managed `Revision`/`Route`/`Configuration` objects
+Knative derives from it.
+
+| Field | Value / Source |
+|---|---|
+| Name | `sample-app` |
+| Namespace | `sample-app` |
+| Image | This run's Build Artifact, referenced by immutable SHA tag |
+| Env | `DATABASE_URL` from `sample-app-db-credentials` Secret (`valueFrom.secretKeyRef`); `PORT` (Nest reads `process.env.PORT`, defaults 3000 — Knative injects `PORT` itself, so this is left to Knative's default, not hardcoded) |
+| imagePullSecrets | `sample-app-ghcr-pull` (Principle IV) |
+| Scaling | Standard Knative KPA autoscaling, scale-to-zero allowed (unlike Postgres) |
+| Networking | Reachable at `https://sample-app.cert.local` via existing Kourier + nginx TLS reverse proxy (Part II, unchanged) |
+
+**State transitions**: `kn service apply` either creates the Service (first-ever run) or creates a
+new Revision and shifts the Route's traffic to it (subsequent runs) only after: the migration Job
+(below) has completed successfully. If the new Revision fails to become Ready, Knative's own
+traffic-shifting behavior keeps the previous Revision serving 100% of traffic (Assumptions section
+of spec.md — no custom rollback logic added here, per FR-015's "MUST NOT disrupt the
+already-running application").
+
+## Entity: Application Database
+
+Concrete form: a plain Kubernetes `Deployment` (name `sample-app-postgres`) + `Service` (name
+`sample-app-postgres`, `ClusterIP`, port 5432) + `PersistentVolumeClaim` (name
+`sample-app-postgres-data`) in the `sample-app` namespace. **Not** a Knative Service (Principle
+VIII — must never scale to zero).
+
+| Field | Value / Source |
+|---|---|
+| Image | `postgres:16` (matches constitution's Technology Stack Constraints) |
+| Resources | `requests: {cpu: 250m, memory: 256Mi}`, `limits: {cpu: 500m, memory: 512Mi}` (research.md §2) |
+| Storage | PVC bound to the dedicated `sample-app-db-storage` StorageClass (research.md §3), size sized for this exercise's data volume (e.g. `2Gi` — generous relative to a training/coaching-platform demo dataset) |
+| Replicas | 1 (a single-instance Postgres; no HA/replication in scope) |
+| Strategy | `strategy: {type: Recreate}` — the default `RollingUpdate` can wedge in `Pending` trying to mount the RWO PVC into a surge pod while the old pod still holds it; not triggered by today's pinned `postgres:16` image, but cheap, preventive correctness for any future image/resource change to this Deployment |
+| Readiness | `readinessProbe: {exec: {command: ["pg_isready", "-U", "sampleapp"]}, initialDelaySeconds: 5, periodSeconds: 5, failureThreshold: 12}` — `sampleapp` matches the `POSTGRES_USER` value the Database Access Credential entity creates, not a placeholder (matches tasks.md T017). Checks Postgres is actually accepting connections, not just that the process started. The `Deployment`'s `Available` condition (gated on in Contract 3 step 6) depends on pod readiness, and without this probe Kubernetes marks the container Ready as soon as the process forks, before `initdb` finishes — a real race on the very-first-ever deploy (spec.md Edge Cases), where first-time `initdb` takes noticeably longer than a normal restart. `failureThreshold: 12` at a 5s period gives ~60s of grace for first-time `initdb` before the probe is considered failed. |
+| Applied by | Idempotent `kubectl apply -f k8s/postgres-*.yaml` as an early step of the deploy job, before the migration Job |
+
+**State transitions**: created once, on the first-ever deploy run. Every subsequent run's
+`kubectl apply` is a no-op reconciliation against the already-existing object (FR-015: "MUST NOT
+create duplicate infrastructure"). Never deleted or recreated by the pipeline.
+
+## Entity: Database Access Credential
+
+Concrete form: a Kubernetes `Secret` (name `sample-app-db-credentials`, type `Opaque`) in the
+`sample-app` namespace, holding four literal keys: `POSTGRES_USER`, `POSTGRES_DB`,
+`POSTGRES_PASSWORD`, and the assembled `DATABASE_URL`.
+
+| Field | Value / Source |
+|---|---|
+| Keys | `POSTGRES_USER: sampleapp`, `POSTGRES_DB: sampleapp`, `POSTGRES_PASSWORD: ${{ secrets.SAMPLE_APP_DB_PASSWORD }}` (raw), `DATABASE_URL: postgresql://sampleapp:<percent-encoded password>@sample-app-postgres.sample-app.svc.cluster.local:5432/sampleapp` — all four are explicit `--from-literal` keys, not just `POSTGRES_PASSWORD`/`DATABASE_URL` with the user/db name only embedded in the URL string: the Postgres Deployment (data-model.md's Application Database entity) reads `POSTGRES_USER` and `POSTGRES_DB` individually via `secretKeyRef`, and a `secretKeyRef` pointing at a key that doesn't exist in the Secret puts the pod in `CreateContainerConfigError` — it never starts, so the readinessProbe never runs and the deploy job's `kubectl wait --for=condition=available` (Contract 3 step 6) times out looking like "Postgres won't come up," when the actual cause is a missing Secret key. `DATABASE_URL`'s copy of the password is percent-encoded (`jq -rn --arg p "$PASSWORD" '$p \| @uri'`) — `POSTGRES_PASSWORD` itself stays raw, since Postgres's own auth expects the literal value. `SAMPLE_APP_DB_PASSWORD` is a human-chosen secret with no character-set restriction, and an unencoded `@`/`:`/`/`/`#`/`?`/space/`%` in a connection URI either fails to parse or silently misparses the user/password/host boundary — verified end-to-end against a real Postgres instance with a password containing every one of those characters |
+| Password source | `${{ secrets.SAMPLE_APP_DB_PASSWORD }}` — a GitHub Actions repository secret, set once by a maintainer (spec.md Assumptions) |
+| Creation command | `kubectl create secret generic sample-app-db-credentials --from-literal=POSTGRES_USER=sampleapp --from-literal=POSTGRES_DB=sampleapp --from-literal=POSTGRES_PASSWORD=... --from-literal=DATABASE_URL=... --dry-run=client -o yaml \| kubectl apply -f -` — idempotent, and since the literal values come from the same stable GitHub secret (password) and fixed constants (user/db name) every run, re-applying never changes the stored values (FR-010: "MUST NOT generate a new value on each run") |
+| Consumed by | Postgres Deployment (as `POSTGRES_USER`/`POSTGRES_DB`/`POSTGRES_PASSWORD` env, each via its own `secretKeyRef`), the migration Job and the Knative Service (both as `DATABASE_URL` via `secretKeyRef`) |
+
+**Validation rule**: this Secret MUST exist and be correctly populated before both the migration
+Job and the Knative Service are applied — deploy-job step ordering enforces this (see
+contracts/manifests.md).
+
+## Entity: Registry Access Credential
+
+Concrete form: a Kubernetes `Secret` (name `sample-app-ghcr-pull`, type
+`kubernetes.io/dockerconfigjson`) in the `sample-app` namespace.
+
+| Field | Value / Source |
+|---|---|
+| Creation command | `kubectl create secret docker-registry sample-app-ghcr-pull --docker-server=ghcr.io --docker-username=${{ vars.GHCR_PULL_USERNAME }} --docker-password=${{ secrets.GHCR_PULL_PAT }} --dry-run=client -o yaml \| kubectl apply -f -` (Principle IV). Username is the fixed repository **variable** `GHCR_PULL_USERNAME` (the PAT-owning account), **not** `${{ github.actor }}` — verified against GitHub's own docs (the `docker-to-azure-app-service` guide pairs a PAT with its fixed owning account as username, not a dynamic contributor identity); matches contracts/manifests.md Contract 2 and tasks.md T022. |
+| Scope of the PAT | `read:packages` only (Principle IV — least privilege) |
+| Consumed by | Knative Service and the migration Job, both via `spec.template.spec.imagePullSecrets: [{name: sample-app-ghcr-pull}]` — the Job pulls the same private SHA-tagged image as the Knative Service it precedes, so it needs the identical pull secret reference |
+
+## New Entity (not in spec.md's Key Entities, introduced by this plan's design decisions):
+Migration Job
+
+Concrete form: a Kubernetes `Job` (name `sample-app-migrate-<github.run_id>`, unique per workflow
+*execution* — not per commit — so an on-demand manual re-run of the same commit, including a retry
+of a run whose migration previously failed, always gets a fresh Job object; see below and
+contracts/manifests.md Contract 3 step 7) in the `sample-app` namespace, running `prisma migrate
+deploy` against `DATABASE_URL`.
+
+| Field | Value / Source |
+|---|---|
+| Name | `sample-app-migrate-${{ github.run_id }}` — **not** the commit SHA. `github.run_id` is unique per workflow run (including a manual re-run of an unchanged commit, per spec.md Assumptions' "on-demand manual trigger for re-running deployment without a new code change"). Naming by SHA instead would mean a prior failed Job (`backoffLimit: 0` exhausted, object still present as `Failed`) blocks every subsequent retry against that same commit — `kubectl apply`/`create` would hit `AlreadyExists`, and `kubectl wait --for=condition=complete` on the old, already-`Failed` object would never succeed, forcing a manual `kubectl delete job` before any retry could work. `github.run_id` sidesteps this entirely: every execution, retried or not, is a new Job. |
+| Image | Same Build Artifact SHA tag as the Knative Service it precedes (ensures the schema and the code that expects it are always the same commit) |
+| `imagePullSecrets` | `[{name: sample-app-ghcr-pull}]` — same private-registry pull secret as the Knative Service (see Registry Access Credential entity). Without this, the pod can't pull the private GHCR image at all (Principle IV) and sits in `ErrImagePullBackOff`; `kubectl wait --for=condition=complete` then times out, and the failure surfaces as a migration-step timeout even though it's actually a missing pull-secret reference — easy to misdiagnose, so this field is called out explicitly rather than left implicit in a shared pod-spec template. |
+| Command | `npx prisma migrate deploy` (existing `apps/backend` Prisma setup, unchanged) |
+| `backoffLimit` | `0` — a migration failure must surface immediately as a Job failure, not be silently retried and masked (Principle VIII: "fail the deploy loudly ... rather than silently") |
+| `ttlSecondsAfterFinished` | `3600` — completed/failed Job objects are garbage-collected by Kubernetes an hour after finishing, instead of accumulating indefinitely in the `sample-app` namespace across every pipeline run (each run mints a uniquely-named Job per the naming decision above, so without a TTL these would never be cleaned up) |
+| Resources | `requests: {cpu: 100m, memory: 128Mi}`, `limits: {cpu: 200m, memory: 256Mi}` — explicit, not left implicit `BestEffort`, for consistency with every other manifest in this repo (Principle VIII's spirit). The Job is short-lived (~1s of actual `prisma migrate deploy` work, measured empirically against this schema — see below), so this is a small, fixed footprint rather than a sized-for-load budget. |
+| Gate | Deploy job runs `kubectl wait --for=condition=complete --timeout=180s job/sample-app-migrate-${{ github.run_id }}` and stops the deploy (does not run `kn service apply`) on a non-zero result. `180s` is verified, not guessed: a local timed run of `prisma migrate deploy` against this exact repo's `apps/backend/prisma/migrations` (2 migrations, 16 models) on a warm Postgres 16 container completed in ~1s — so the 180s budget is almost entirely headroom for the app image's first-ever pull and pod scheduling on the target worker, not migration execution time. |
+
+## New Entity: Storage Class
+
+Concrete form: `StorageClass` `sample-app-db-storage` (cluster-scoped, not namespaced),
+`provisioner: rancher.io/local-path`, `reclaimPolicy: Retain`, `volumeBindingMode:
+WaitForFirstConsumer` (research.md §3). Referenced by the Postgres PVC's `storageClassName`.

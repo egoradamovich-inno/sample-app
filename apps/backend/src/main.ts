@@ -8,12 +8,14 @@ import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
+import type { NextFunction, Request, Response } from 'express';
 import { AppModule } from './app.module';
 import { AppExceptionFilter } from './shared/errors/app-exception.filter';
 import { ValidationException } from './shared/errors/validation.exception';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  app.setGlobalPrefix('api');
   app.enableCors({ origin: true, credentials: true });
   app.use(cookieParser());
   // LocalDiskStorage writes branding logos/profile photos under
@@ -21,6 +23,23 @@ async function bootstrap() {
   // outside the Nest routing/guard chain and serves these files publicly —
   // deliberate for this codebase (unguessable UUID filenames), not an oversight.
   app.useStaticAssets(join(process.cwd(), 'uploads'), { prefix: '/uploads' });
+  // Built frontend assets (Vite's dist/ output, copied to public/ in the
+  // production image) served the same way — outside the Nest routing/guard
+  // chain, like /uploads above. `index: false` defers serving index.html to
+  // the SPA-fallback middleware below, so there is one place that decides
+  // when to return it instead of two.
+  app.useStaticAssets(join(process.cwd(), 'public'), { index: false });
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (
+      req.method === 'GET' &&
+      !req.path.startsWith('/api') &&
+      !req.path.startsWith('/uploads')
+    ) {
+      res.sendFile(join(process.cwd(), 'public', 'index.html'));
+    } else {
+      next();
+    }
+  });
   app.useGlobalFilters(new AppExceptionFilter());
   app.useGlobalPipes(
     new ValidationPipe({

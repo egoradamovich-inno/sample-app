@@ -1,0 +1,34 @@
+# Rendered via: IMAGE=... envsubst < k8s/knative-service.template.yaml | kn service apply sample-app -n sample-app -f -
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: sample-app
+  namespace: sample-app
+spec:
+  template:
+    spec:
+      imagePullSecrets:
+        - name: sample-app-ghcr-pull
+      containers:
+        - image: ${IMAGE}
+          env:
+            - name: NODE_ENV
+              value: production
+            # apps/backend/src/shared/cookies/auth-cookies.util.ts gates the httpOnly
+            # cookies' `Secure` flag on NODE_ENV === 'production'.
+            - name: FRONTEND_URL
+              value: https://sample-app.cert.local
+            # apps/backend/src/modules/sharelink/sharelink.service.ts builds share-link URLs
+            # from this; defaults to http://localhost:5173 if unset, which would be wrong here.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sample-app-db-credentials
+                  key: DATABASE_URL
+            - name: JWT_ACCESS_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: sample-app-jwt-secret
+                  key: JWT_ACCESS_SECRET
+            # PORT is deliberately not set here: Knative injects it itself, and
+            # apps/backend/src/main.ts reads process.env.PORT with a 3000 fallback.

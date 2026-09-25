@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sample-app-postgres
+  namespace: sample-app
+spec:
+  replicas: 1
+  # RollingUpdate can wedge in Pending trying to mount the RWO PVC into a surge pod while the
+  # old pod still holds it. Not triggered by today's pinned postgres:16 image, but cheap,
+  # preventive correctness for any future image/resource change to this Deployment.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: sample-app-postgres
+  template:
+    metadata:
+      labels:
+        app: sample-app-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: sample-app-db-credentials
+                  key: POSTGRES_USER
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: sample-app-db-credentials
+                  key: POSTGRES_DB
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sample-app-db-credentials
+                  key: POSTGRES_PASSWORD
+            # Nest PGDATA one level below the mount point: some volume implementations seed
+            # a lost+found directory at the mount root, which initdb refuses to initialize
+            # into if it isn't empty.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          # Sized against measured live headroom on the k3s workers (research.md §2): both
+          # schedulable workers currently commit only 500m CPU / 260-500Mi memory out of
+          # 2 vCPU / ~2.9Gi allocatable each.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # Checks Postgres is actually accepting connections, not just that the process
+          # started. initialDelaySeconds + failureThreshold*periodSeconds gives ~65s grace for
+          # first-ever initdb, which takes noticeably longer than a normal restart.
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "sampleapp"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: sample-app-postgres-data

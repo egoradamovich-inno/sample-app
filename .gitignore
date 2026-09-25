@@ -24,3 +24,10 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# Self-hosted GitHub Actions runner install (should live alongside this repo, not inside it —
+# contains its own credentials/.runner config and, once jobs run, full _work/ checkouts)
+actions-runner/
+
+# Stray tool binary downloaded into the repo root while following runner setup docs
+/kubectl

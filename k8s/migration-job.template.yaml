@@ -1,0 +1,47 @@
+# Rendered via: IMAGE=... RUN_ID=... envsubst < k8s/migration-job.template.yaml | kubectl apply -n sample-app -f -
+#
+# Named by ${RUN_ID} (github.run_id), not the commit SHA: a SHA-named Job would collide with
+# a still-Failed Job from a prior attempt at the same commit and block on-demand retries
+# (data-model.md's Migration Job entity).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sample-app-migrate-${RUN_ID}
+  namespace: sample-app
+spec:
+  # A migration failure must surface immediately as a Job failure, not be silently retried
+  # and masked (Constitution Principle VIII).
+  backoffLimit: 0
+  # Completed/failed Job objects are garbage-collected an hour after finishing, instead of
+  # accumulating indefinitely — each run mints a uniquely-named Job (see above), so without a
+  # TTL these would never be cleaned up.
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      # Same private-registry pull secret as the Knative Service: this Job pulls the same
+      # private image, and without this reference the pod can't pull it at all, producing an
+      # ErrImagePullBackOff easily misdiagnosed as a migration failure.
+      imagePullSecrets:
+        - name: sample-app-ghcr-pull
+      containers:
+        - name: migrate
+          image: ${IMAGE}
+          command: ["npx", "prisma", "migrate", "deploy"]
+          workingDir: /app/apps/backend
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sample-app-db-credentials
+                  key: DATABASE_URL
+          # Explicit, not implicit BestEffort, for consistency with every other manifest in
+          # this repo. Short-lived (~1s of actual `prisma migrate deploy` work, measured
+          # empirically against this schema), so this is a small, fixed footprint.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi

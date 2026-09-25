@@ -1,0 +1,13 @@
+# Dedicated StorageClass with reclaimPolicy: Retain, backing only the Postgres PVC.
+# The cluster's own default (`local-path`, from k3s's local-storage addon) is confirmed
+# reclaimPolicy: Delete (research.md §3) — unacceptable for this app's persistent database,
+# which must never be recreated from scratch (Constitution Principle VIII). Same provisioner
+# and volumeBindingMode as the cluster default; only reclaimPolicy differs, so this does not
+# touch or second-guess Part II's actual `local-path` StorageClass (Principle I).
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: sample-app-db-storage
+provisioner: rancher.io/local-path
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
