@@ -270,44 +270,62 @@ the gap at the root, not just papering over it with a bigger number), and the ti
 exactly the class of assumption Principle VI exists to catch — a local approximation stood in for
 the live system's actual behavior, and the live system disagreed.
 
-## 8. `sharp` crashing on the live cluster: CPU feature mismatch, fixed by installing `@img/sharp-wasm32`
+## 8. `sharp` crashing on the live cluster: CPU lacks SIMD entirely — Part I platform blocker, not fixed in this repo
 
 **Discovered during `/speckit-implement`'s first real deploy**, not anticipated at plan time:
 the Knative revision's pod crash-looped with `TypeError: Cannot read properties of undefined
 (reading 'endsWith')` at `sharp.cjs:115`, even though the exact same image booted and served
 requests correctly in every local Docker test this session ran.
 
-**Root-caused with live evidence, not guessed**: a diagnostic pod scheduled directly onto
-`k3s-worker1` (`kubectl run ... --overrides='{"spec":{"nodeSelector":...}}'`) confirmed that
-node's virtual CPU exposes **none** of `avx`, `avx2`, `sse4_1`, or `sse4_2` — this planning/
-implementation session's own host has all four. `sharp` 0.35.4's prebuilt native binding
-(`@img/sharp-linux-x64`, via libvips/highway) requires at least SSE4.2 for the code paths it
-loads; on a CPU lacking it, the native `require()` throws an error with no `.code` property (not
-a plain `MODULE_NOT_FOUND`). Reading `sharp.cjs`'s actual source directly showed this is
-survivable *if* a wasm32 fallback is available — `sharp` tries the native binding, then
-`@img/sharp-wasm32/sharp.node`, and only crashes in its own error-reporting code (a real bug,
-`err.code.endsWith(...)` on an error with no `.code`) if **both** attempts fail. This repo had
-never installed `@img/sharp-wasm32`, so the second attempt was always a plain
-`MODULE_NOT_FOUND` and the crash always followed.
+**Root-caused with live evidence in two rounds, not guessed — the first round's fix turned out
+to be incomplete**:
 
-**Decision**: add `@img/sharp-wasm32` (already present in `package-lock.json` as `sharp`'s own
-`optionalDependency`, just never installed) as an explicit `apps/backend/package.json`
-dependency. Verified, not assumed: mounting this repo's actual `node_modules` into a `node:22-slim`
-container under `docker run --platform linux/arm64` (a harder failure mode than a missing CPU
-feature — a full architecture mismatch, guaranteeing the native binary fails to load) showed
-`sharp` cleanly falling back to its Emscripten/WASM build (`sharp.versions` reporting
-`"emscripten": "6.0.8"`, no native arch) with no crash.
+Round 1: a diagnostic pod scheduled directly onto `k3s-worker1` confirmed that node's virtual
+CPU exposes **none** of `avx`, `avx2`, `sse4_1`, or `sse4_2` — this planning/implementation
+session's own host has all four. `sharp` 0.35.4's prebuilt native binding
+(`@img/sharp-linux-x64`) requires at least SSE4.2 (the x86-64-v2 microarchitecture level);
+`sharp` itself detects this via `_isUsingX64V2()` and correctly nulls the result out with a
+synthetic error carrying `code: "Unsupported CPU"`. Reading `sharp.cjs`'s source showed a
+documented fallback path: `@img/sharp-wasm32`, which this repo had never installed (present only
+as `sharp`'s own unresolved `optionalDependency`). Adding it as an explicit dependency was
+verified under `docker run --platform linux/arm64` (a full architecture mismatch, forcing the
+native attempt to fail) to cleanly fall back to the WASM build with no crash — but that test
+only proved the *mechanism* works when the native attempt fails with a plain
+`MODULE_NOT_FOUND`, not that it survives *this specific* CPU's actual failure mode.
 
-**Why not fix this at the platform level instead**: the k3s VMs' CPU model is a Part I
-(Terraform/libvirt) provisioning decision, and Constitution Principle I forbids this repo from
-re-provisioning or second-guessing platform-level decisions made there — an application-level
-fix (this dependency) stays within this feature's actual scope.
+Round 2 (after redeploying the round-1 fix and it **still** crashed identically): a second
+diagnostic pod, this time running a script that mimics `sharp`'s own attempt sequence directly
+against the real deployed image on `k3s-worker1`, showed the *complete* picture:
+- Native attempt: loads, `_isUsingX64V2()` → `false` (as before).
+- WASM attempt (`@img/sharp-wasm32/sharp.node`): **also fails** —
+  `CompileError: WebAssembly.Module(): Wasm SIMD unsupported`. This `CompileError` has no
+  `.code` property (unlike a plain `MODULE_NOT_FOUND`), which is what actually trips `sharp`'s
+  own error-reporting bug — but the underlying problem is real: V8's WebAssembly SIMD
+  implementation itself needs a baseline of native SIMD instructions to lower to, and this CPU
+  provides none. **Both of `sharp`'s available code paths require SIMD support this CPU does
+  not have at any level.**
 
-**Alternatives considered**:
+**Decision**: do not route around this in the `sample-app` repository. Per Constitution
+Principle I, the k3s VMs' CPU model is a Part I (Terraform/libvirt) provisioning decision, and
+this repo must not re-provision, redesign, or second-guess it. Documented as **ADR-002**
+(`docs/adr/ADR-002-sharp-cpu-simd-blocker.md`) with the full evidence chain and the recommended
+Part I fix (`cpu { mode = "host-passthrough" }`, or a named baseline model with at least
+SSE4.2, on the affected `libvirt_domain` resources). The `@img/sharp-wasm32` dependency added
+in round 1 stays in `apps/backend/package.json` — harmless, and a genuine safety net for any
+future host with WASM SIMD support but no native x86-64-v2 support — but it does not by itself
+resolve this specific cluster's blocker. **T030/T034/T035 (this feature's live-deploy
+checkpoints) remain blocked pending the Part I fix.**
+
+**Alternatives considered and explicitly not taken in this repo** (each would work, but works
+around the platform issue rather than fixing it — left as fallback options in ADR-002 if the
+platform fix proves infeasible):
 - Downgrade `sharp` to an older version that might avoid the same SIMD requirement: rejected —
-  reintroduces the CVEs this same implementation phase just fixed (research.md's Trivy-gate
-  fixes), trading one real problem for another.
-- Build `sharp`/`libvips` from source in the Dockerfile targeting a conservative CPU baseline:
-  rejected as disproportionate — requires a full C/C++ toolchain and libvips build dependencies
-  at image-build time for a problem the vendor's own documented WASM fallback already solves
-  with a one-line dependency addition.
+  reintroduces the CVEs this same implementation phase just fixed (research.md §6/T-series
+  Trivy-gate fixes), trading one real problem for another.
+- Build `sharp`/`libvips` from source in the Dockerfile targeting a conservative, no-SIMD-
+  assumed CPU baseline: a real, repo-scoped fix that would work regardless of the platform, but
+  requires a full C/C++ toolchain and libvips's own build dependencies at image-build time —
+  disproportionate compared to fixing the actual CPU model at the source, and not what was
+  decided here.
+- Replace `sharp` with a pure-JavaScript image library (no native/WASM binary at all): also
+  viable, but an application-code change beyond this feature's CI/CD scope, not selected.
