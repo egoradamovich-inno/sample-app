@@ -229,6 +229,21 @@ jobs:
           IMAGE="$IMAGE:${{ github.sha }}" envsubst < k8s/knative-service.template.yaml > /tmp/knative-service.rendered.yaml
           kn service apply sample-app -n sample-app -f /tmp/knative-service.rendered.yaml
 
+      - name: Ensure the sample-app.cert.local domain mapping (idempotent)
+        # Discovered the Knative Ingress never registered sample-app.cert.local as a route at
+        # all (no DomainMapping existed, config-domain has no functional rule) — confirmed via
+        # a real deploy that returned 404 at Kourier even for the exact internal host from
+        # status.url, while the app itself and nginx were both independently verified healthy.
+        # ClusterDomainClaim must be explicit: autocreate-cluster-domain-claims is confirmed
+        # "false" (Knative's built-in default; config-network has no override on this
+        # cluster). No spec.tls on the DomainMapping: external-domain-tls is confirmed
+        # "Disabled" cluster-wide, so this maps to plain HTTP, matching what nginx already
+        # expects when it proxies to Kourier (nginx owns TLS termination itself).
+        run: kubectl apply -f k8s/domain-claim.yaml -f k8s/domain-mapping.yaml -n sample-app
+
+      - name: Wait for the domain mapping to be ready
+        run: kubectl wait --for=condition=Ready domainmapping/sample-app.cert.local -n sample-app --timeout=60s
+
       - name: Verify reachability (FR-014, Constitution Principle VI — real curl, not a green checkmark)
         run: |
           STATUS=$(curl -k -sS -o /tmp/body -w '%{http_code}' https://sample-app.cert.local)

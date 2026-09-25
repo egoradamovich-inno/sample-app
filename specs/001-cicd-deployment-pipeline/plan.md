@@ -141,7 +141,9 @@ k8s/
 ├── postgres-service.yaml        # ClusterIP Service, port 5432
 ├── postgres-pvc.yaml            # PVC bound to sample-app-db-storage
 ├── migration-job.template.yaml   # Job template: prisma migrate deploy (${IMAGE}/${RUN_ID} substituted via envsubst per run)
-└── knative-service.template.yaml # kn/Knative Service template (${IMAGE} substituted via envsubst per run; env, imagePullSecrets, DATABASE_URL)
+├── knative-service.template.yaml # kn/Knative Service template (${IMAGE} substituted via envsubst per run; env, imagePullSecrets, DATABASE_URL)
+├── domain-claim.yaml            # ClusterDomainClaim: delegates sample-app.cert.local to the sample-app namespace
+└── domain-mapping.yaml          # DomainMapping: binds sample-app.cert.local to the sample-app Knative Service (discovered missing during /speckit-implement)
 ```
 
 **Structure Decision**: This is infrastructure/pipeline work layered onto the existing

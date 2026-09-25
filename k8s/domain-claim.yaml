@@ -1,0 +1,11 @@
+# ClusterDomainClaim: delegates the exact hostname sample-app.cert.local to the sample-app
+# namespace, so this namespace's DomainMapping is allowed to claim it. Cluster-scoped, applied
+# idempotently (kubectl apply is a no-op on re-run). autocreate-cluster-domain-claims is
+# confirmed "false" (Knative's built-in default; config-network has no override) on this
+# cluster, so this must be created explicitly rather than relying on auto-creation.
+apiVersion: networking.internal.knative.dev/v1alpha1
+kind: ClusterDomainClaim
+metadata:
+  name: sample-app.cert.local
+spec:
+  namespace: sample-app

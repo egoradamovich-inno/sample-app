@@ -1,0 +1,14 @@
+# DomainMapping: binds the exact hostname sample-app.cert.local to the sample-app Knative
+# Service. No spec.tls block — external-domain-tls is confirmed "Disabled" cluster-wide, so
+# this maps to plain HTTP, matching what nginx already expects when it proxies to Kourier
+# (nginx owns TLS termination itself, per Constitution Principle I).
+apiVersion: serving.knative.dev/v1beta1
+kind: DomainMapping
+metadata:
+  name: sample-app.cert.local
+  namespace: sample-app
+spec:
+  ref:
+    name: sample-app
+    kind: Service
+    apiVersion: serving.knative.dev/v1

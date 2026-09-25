@@ -121,3 +121,48 @@ deploy` against `DATABASE_URL`.
 Concrete form: `StorageClass` `sample-app-db-storage` (cluster-scoped, not namespaced),
 `provisioner: rancher.io/local-path`, `reclaimPolicy: Retain`, `volumeBindingMode:
 WaitForFirstConsumer` (research.md §3). Referenced by the Postgres PVC's `storageClassName`.
+
+## New Entity (discovered during `/speckit-implement`'s first real deploy, not anticipated at
+plan time): Cluster Domain Claim
+
+Without this, the Knative Ingress never registers `sample-app.cert.local` as a route at all —
+its own default-generated hosts are only internal `sample-app.sample-app[.svc[.cluster.local]]`
+forms, confirmed via a real 404 straight from Kourier for the external host, independently of
+the app (healthy) and nginx (healthy, forwards the Host header correctly) — see
+contracts/manifests.md Contract 3 step 8.5 and research.md's addendum on this discovery.
+
+Concrete form: `ClusterDomainClaim` (`networking.internal.knative.dev/v1alpha1`, cluster-scoped,
+not namespaced — confirmed via `kubectl api-resources`/`kubectl explain` against the live
+cluster, not assumed from docs, since different Knative doc snapshots showed inconsistent API
+versions) named `sample-app.cert.local`, delegating that exact hostname to the `sample-app`
+namespace so its `DomainMapping` (below) is permitted to claim it.
+
+| Field | Value / Source |
+|---|---|
+| `spec.namespace` | `sample-app` — the one namespace this repo uses consistently for every other resource (research.md §5) |
+| Creation command | `kubectl apply -f k8s/domain-claim.yaml` — idempotent (a `ClusterDomainClaim` re-applied with the same spec is a no-op), matching every other "ensure exists" step in this pipeline |
+| Why explicit, not auto-created | `config-network`'s `autocreate-cluster-domain-claims` has no override on this live cluster (confirmed via `kubectl get cm config-network -n knative-serving` — the entire functional `data` block is just `ingress-class: kourier.ingress.networking.knative.dev`; every other setting, including this one, exists only in the illustrative `_example` block). Knative's built-in default for this flag is `"false"`, meaning the cluster administrator (this pipeline) is responsible for creating `ClusterDomainClaim`s explicitly. |
+| Consumed by | The `DomainMapping` below — Knative's admission/reconciliation logic checks that a claim exists and names this namespace before allowing the `DomainMapping` to take effect |
+
+**State transitions**: created once, on the first-ever deploy that reaches this step. Every
+subsequent run's `kubectl apply` is a no-op reconciliation (FR-015). Never deleted or recreated
+by the pipeline.
+
+## New Entity (same discovery as above): Domain Mapping
+
+Concrete form: `DomainMapping` (`serving.knative.dev/v1beta1` — confirmed via `kubectl explain
+domainmapping` against the live cluster) named `sample-app.cert.local` in the `sample-app`
+namespace, referencing the `sample-app` Knative Service.
+
+| Field | Value / Source |
+|---|---|
+| `spec.ref` | `{name: sample-app, kind: Service, apiVersion: serving.knative.dev/v1}` — the Knative Service this hostname routes to (data-model.md's Deployed Application Instance entity) |
+| `spec.tls` | Deliberately omitted. `config-network`'s `external-domain-tls` has no override on this live cluster either (same `_example`-only situation as `autocreate-cluster-domain-claims` above), so Knative's built-in default (`"Disabled"`) applies — no automatic certificate provisioning is attempted. This matches the cluster's actual TLS architecture: nginx already terminates TLS with its own self-signed certificate before proxying to Kourier (Constitution Principle I), and there is no cert-manager installed on this cluster to fulfill an automatic-TLS request even if one were attempted. Omitting `spec.tls` maps the `DomainMapping` to plain HTTP, which is exactly what nginx's `proxy_pass http://kourier_gateway` (plain HTTP, not HTTPS) already expects. |
+| Creation command | `kubectl apply -f k8s/domain-mapping.yaml` — idempotent, same pattern as every other resource in this pipeline. Applied together with the `ClusterDomainClaim` in one step: `kubectl apply -f k8s/domain-claim.yaml -f k8s/domain-mapping.yaml -n sample-app` |
+| Gate | Deploy job runs `kubectl wait --for=condition=Ready domainmapping/sample-app.cert.local -n sample-app --timeout=60s` before the reachability check — the same "don't trust `apply` succeeding, verify status" discipline already applied to the migration Job and the Postgres Deployment (Constitution Principle VI) |
+| Ordering | Must be applied **after** the Knative Service (its `spec.ref` needs the Service to already exist) and **before** the reachability curl (the mapping needs to actually be routing, not just accepted by the API server) — contracts/manifests.md Contract 3 step 8.5, between steps 8 and 9 |
+
+**State transitions**: created once, on the first-ever deploy that reaches this step. Every
+subsequent run's `kubectl apply` is a no-op reconciliation (FR-015) — the mapping's `spec.ref`
+never changes (it always points at the same Knative Service by name), so redeploys never
+recreate or disrupt it. Never deleted by the pipeline.
