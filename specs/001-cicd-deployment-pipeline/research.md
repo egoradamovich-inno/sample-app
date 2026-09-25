@@ -269,3 +269,45 @@ the gap at the root, not just papering over it with a bigger number), and the ti
 `300s` (real margin above the observed 181s, rather than the ~1s the original 180s left). This is
 exactly the class of assumption Principle VI exists to catch — a local approximation stood in for
 the live system's actual behavior, and the live system disagreed.
+
+## 8. `sharp` crashing on the live cluster: CPU feature mismatch, fixed by installing `@img/sharp-wasm32`
+
+**Discovered during `/speckit-implement`'s first real deploy**, not anticipated at plan time:
+the Knative revision's pod crash-looped with `TypeError: Cannot read properties of undefined
+(reading 'endsWith')` at `sharp.cjs:115`, even though the exact same image booted and served
+requests correctly in every local Docker test this session ran.
+
+**Root-caused with live evidence, not guessed**: a diagnostic pod scheduled directly onto
+`k3s-worker1` (`kubectl run ... --overrides='{"spec":{"nodeSelector":...}}'`) confirmed that
+node's virtual CPU exposes **none** of `avx`, `avx2`, `sse4_1`, or `sse4_2` — this planning/
+implementation session's own host has all four. `sharp` 0.35.4's prebuilt native binding
+(`@img/sharp-linux-x64`, via libvips/highway) requires at least SSE4.2 for the code paths it
+loads; on a CPU lacking it, the native `require()` throws an error with no `.code` property (not
+a plain `MODULE_NOT_FOUND`). Reading `sharp.cjs`'s actual source directly showed this is
+survivable *if* a wasm32 fallback is available — `sharp` tries the native binding, then
+`@img/sharp-wasm32/sharp.node`, and only crashes in its own error-reporting code (a real bug,
+`err.code.endsWith(...)` on an error with no `.code`) if **both** attempts fail. This repo had
+never installed `@img/sharp-wasm32`, so the second attempt was always a plain
+`MODULE_NOT_FOUND` and the crash always followed.
+
+**Decision**: add `@img/sharp-wasm32` (already present in `package-lock.json` as `sharp`'s own
+`optionalDependency`, just never installed) as an explicit `apps/backend/package.json`
+dependency. Verified, not assumed: mounting this repo's actual `node_modules` into a `node:22-slim`
+container under `docker run --platform linux/arm64` (a harder failure mode than a missing CPU
+feature — a full architecture mismatch, guaranteeing the native binary fails to load) showed
+`sharp` cleanly falling back to its Emscripten/WASM build (`sharp.versions` reporting
+`"emscripten": "6.0.8"`, no native arch) with no crash.
+
+**Why not fix this at the platform level instead**: the k3s VMs' CPU model is a Part I
+(Terraform/libvirt) provisioning decision, and Constitution Principle I forbids this repo from
+re-provisioning or second-guessing platform-level decisions made there — an application-level
+fix (this dependency) stays within this feature's actual scope.
+
+**Alternatives considered**:
+- Downgrade `sharp` to an older version that might avoid the same SIMD requirement: rejected —
+  reintroduces the CVEs this same implementation phase just fixed (research.md's Trivy-gate
+  fixes), trading one real problem for another.
+- Build `sharp`/`libvips` from source in the Dockerfile targeting a conservative CPU baseline:
+  rejected as disproportionate — requires a full C/C++ toolchain and libvips build dependencies
+  at image-build time for a problem the vendor's own documented WASM fallback already solves
+  with a one-line dependency addition.
