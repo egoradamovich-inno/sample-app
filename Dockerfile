@@ -63,6 +63,14 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/* \
   && useradd --create-home --shell /bin/bash appuser
 
+# node:22-slim bundles npm 10.9.9, whose own vendored dependencies (brace-expansion,
+# ip-address, pacote, picomatch, sigstore) carry HIGH-severity CVEs with real fixes
+# available upstream — confirmed via a real Trivy scan and by upgrading and checking the
+# actual bundled versions. The running app never invokes npm itself, but the migration
+# Job's `npx prisma migrate deploy` (same image, different command) does need npm/npx
+# present, so it's upgraded in place rather than removed.
+RUN npm install -g npm@latest
+
 WORKDIR /app/apps/backend
 
 # node_modules lives at /app (one level above cwd): Node's module resolution walks up parent
